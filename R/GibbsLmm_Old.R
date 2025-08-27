@@ -1,223 +1,8 @@
 
 
-make.orthobasis <- function(k){
-  J <- matrix(1, k, k)
-  M <- diag(k) - J / k # make centering matrix
-  Q <- qr.Q(qr(M))  # orthonormal basis
-  C <- Q[, 1:(k - 1)]  # drop final column
-  C
-}
-
 rinv.chisq <- function(n, scale, df){
   scale/rchisq(n=n, df=df)
 }
-
-
-rmvnormAB <- function(B, U = NULL, A = NULL) {
-  # Either U (chol(A)) or A must be provided
-  if (is.null(U) && is.null(A)) stop("Either U or A must be provided")
-
-  # Compute Cholesky if needed
-  if (is.null(U)) {
-    if (!is.matrix(A)) A <- as.matrix(A)
-    U <- chol(A)  # Upper-triangular
-  }
-  
-  n <- length(B)
-  # Solve for mean: mu = A^{-1} B using triangular solves
-  y <- forwardsolve(t(U), B)   # Solve t(U) y = B
-  mu <- backsolve(U, y)        # Solve U mu = y
-  
-  # Sample from standard normal
-  z <- rnorm(n)
-  
-  # Transform to get covariance A^{-1}: x = mu + A^{-1/2} z
-  w <- forwardsolve(t(U), z)   # Solve t(U) w = z
-  x <- mu + w
-  
-  return(x)
-}
-
-
-classify.corrmat <- function(R){
-  if (!isSymmetric(R)){ return "nonsymmetric" }
-  if (all(R==diag(ncol(R)))){ return "I" }
-  if (all(R==diag(diag(R)))){ return "diag" }
-  return "full"
-}
-
-  
-GibbsLmm_VarComp <- setRefClass(
-  Class="GibbsLmm_VarComp",
-  fields=list(
-    # public
-    name = "character",
-    Z = "matrix",
-    R = "matrix",
-    Sinv = "matrix", # R_eps^{-1}
-    # private
-    ZtSinv = "matrix",
-    ZtSinvZ = "matrix",
-    Rinv = "matrix")
-)
-
-GibbsLmm_VarComp$methods(
-  initialize = function(Z, R, Sinv, ...){ 
-    Z <<- Z
-    R <<- R
-    Rinv <<- solve(R)
-    Sinv <<- Sinv
-    ZtSinv <<- NULL
-    ZtSinvZ <<- NULL
-    callSuper(...)
-  },
-  get.k = function(){
-    return (ncol(Z))
-  },
-  get.Rinv = function(){
-    return (Rinv)
-  },
-  get.Z = function(){
-    return (Z)
-  },
-  get.ZtSinv = function(){
-    if (is.null(ZtSinv)){
-      ZtSinv <<- t(Z)%*%Sinv
-    }
-    ZtSinv
-  },
-  get.ZtSinvZ = function(){
-    if (is.null(ZtSinvZ)){
-      ZtSinvZ <<- .self$get.ZtSinv()%*%Z
-    }
-    ZtSinvZ
-  },
-  calc.post.prec <- function(u){
-    k <- ncol(Z)
-    shape <- 0.5*k + prior.shape
-    rate <- 0.5*(u%*%Rinv%*%u + prior.rate)
-    return (c(shape, rate))
-  },
-  calc.post.u.A <- function(sigma2inv, tau2inv){
-    .self$get.ZtSinvZ()*sigma2inv + Rinv*tau2inv
-  },
-  calc.post.u.B <- function(sigma2inv, yres){
-    .self$get.ZtSinv()%*%yresid*sigma2inv
-  },
-  set.Z = function(Z){
-    if (ncol(Z)!=ncol(R)){
-      stop("bad Z")
-    }
-    Z <<- Z
-    ZtSinv <<- NULL
-    ZtSinvZ <<- NULL
-  }
-)
-                         
-GibbsLmm_FixedEffects <- setRefClass(
-  Class="GibbsLmm_FixedEffects",
-  fields=list(
-    vc = "GibbsLmm_VarComp", # use VarComp to hold X and R
-    tau2inv = "numeric"
-  )
-)
-
-GibbsLmm_FixedEffects$methods(
-  initialize = function(X, R, tau2inv, Sinv, ...){
-    vc <<- GibbsLmm_VarComp$new(Z=X, R=R, Sinv)
-    tau2inv <<- tau2inv
-    callSuper(...)
-  },
-  get.X <- function(){
-    vc$get.Z()
-  },
-  get.k <- function(){
-    vc$get.k()
-  },
-  get.Rinv <- function(){
-    vc$get.Rinv()
-  },
-  calc.post.beta.A <- function(sigma2inv){
-    vc$get.ZtSinvZ()*sigma2inv + vc$Rinv*tau2inv
-  },
-  calc.post.beta.B <- function(sigma2inv, yres){
-    vc$get.ZtSinv %*% yres*sigma2inv
-  }
-)
-  
-
-parse.varcomp.arg <- function(rname, rd, Sinv){
-  n <- nrow(Sinv)
-  if (!is.list(rd)){
-    if (is.factor(rd)){
-      rd   <- list(factor=rd)
-    } else {
-      stop("Illegal object type of random effect ", rname,
-           "; it should be a list or a factor.")
-    }
-  }
-  if (!is.null(rd$factor)){
-    rd$Z <- incidence.matrix(rd$factor)
-  }
-  if (is.null(rd$Z) && is.null(rd$R)) {
-    stop("Must specify Z or R for random effect ", rname, "\n")
-  }
-  # use Z and R specifications
-  if (!is.null(rd$Z) && is.null(rd$R)) {  # Z only
-    if (nrow(rd$Z)!=n) {
-      stop("Z should have n rows for random effect ", rname)
-    }
-    rd$R <- diag(rep(1, ncol(rd$R))) # R=I
-  } else if (is.null(rd$Z) && !is.null(rd$R)) { # R only
-    if (ncol(rd$R)=n){
-      stop("R must be n x n if Z is unspecified for random effect ", rname, "\n")
-    }
-    rd$Z <- diag(n)
-  } else { # Z and R
-    if (nrow(rd$Z)!=n) {
-      stop("Z should have n rows for random effect ", rname)
-    }
-    if (ncol(rd$Z)!=ncol(rd$R)){
-      stop("Z and R sizes are incompatible for random effect", rname, "\n")
-    }
-  }
-  Rtype <- classify.corrmat(rd$R)
-  if ("nonsymmetric"==Rtype){
-    stop("R must be a symmmetric matrix for random effect", rname, "\n")
-  }
-  vc <- GibbsLmm_VarComp$new(
-    name=rname,
-    Z=rd$Z,
-    R=rd$R,
-    prior.tau2=rd$prior
-    Sinv=Sinv)
-  return (vc)
-}
-
-parse.fixedeffects.arg <- function(X, R, prior){
-  k <- ncol(X)
-  prior.beta$mean <<- matrix(nrow=fixed$k, rep(prior.beta$mean, length.out=fixed$k))
-  if (1==fixed$k) {
-    fixed$prior.beta$varcov <<- matrix(prior.beta$varcov)
-  } else { 
-    if (length(fixed$prior.beta$varcov)==1) {
-      fixed$prior.beta$varcov <<- rep(fixed$prior.beta$varcov, length.out=fixed$k)
-    }
-    if (length(fixed$prior.beta$varcov)==fixed$k) {
-      fixed$prior.beta$varcov <<- diag(fixed$prior.beta$varcov)
-    }
-    if (!all(dim(fixed$prior.beta$varcov)==rep(fixed$k,2))) {
-      stop("Bad prior for beta\n")
-    }
-  }
-  fixed <- GibbsLmm_FixedEffects$new(
-    X = X,
-    R = R,
-    
-}
-
-
-
 
 
 lmmgibbs <- function(...){
@@ -227,15 +12,15 @@ lmmgibbs <- function(...){
 
 GibbsLmm <- setRefClass("GibbsLmm",
   fields=list(
-    y                = "numeric",
-    prior.sigma2inv  = "list",
-    Sinv             = "matrix",
-    nobs             = "integer",
-    nrand            = "integer",
-    fixed            = "list",
-    random           = "list",
-    block            = "list",
-    state            = "list")
+    y             = "numeric",
+    prior.beta    = "list",
+    prior.sigma2  = "list",
+    nobs          = "integer",
+    nrand         = "integer",
+    fixed         = "list",
+    random        = "list",
+    block         = "list",
+    state         = "list")
 )
 
 
@@ -243,30 +28,44 @@ GibbsLmm$methods(initialize =
   function(
       y,
       X             = matrix(rep(1, length(y)), ncol=1), # default intercept
-      S             = diag(1, nrow(X)), # error structure
       random        = list(),
-      prior.beta    = list(mean=0, R=1, tau2inv=0.001),
-      prior.sigma2  = list(shape=0.02, rate=0.02),
       init.beta     = rep(0,ncol(X)),
       init.sigma2   = sd(y, na.rm=TRUE),
+      prior.beta    = list(
+          mean=0,
+          varcov=1e3),
+      prior.sigma2  = list(
+          scale=0.02,
+          df=0.02),
       fixef.blocking=TRUE,
       ...)
   {
     y <<- c(y)
     nobs <<- length(y)
-    if (is.numeric(S)){
 
-
-    if (nrow(X)!=nobs){
-      stop("X must have ", nobs, " rows")
-    }
-    
+    stopifnot(nrow(X)==nobs)
     
     ## Fixed Effects
     # basics
-    fixed <<- parse.fixedeffects.arg(X, prior.beta, Sinv)
+    fixed$X <<- X
+    fixed$k <<- ncol(X)
         
     # priors
+    fixed$prior.beta <<- prior.beta
+    fixed$prior.beta$mean <<- matrix(nrow=fixed$k, rep(prior.beta$mean, length.out=fixed$k))
+    if (1==fixed$k) {
+      fixed$prior.beta$varcov <<- matrix(prior.beta$varcov)
+    } else { 
+      if (length(fixed$prior.beta$varcov)==1) {
+        fixed$prior.beta$varcov <<- rep(fixed$prior.beta$varcov, length.out=fixed$k)
+      }
+      if (length(fixed$prior.beta$varcov)==fixed$k) {
+        fixed$prior.beta$varcov <<- diag(fixed$prior.beta$varcov)
+      }
+      if (!all(dim(fixed$prior.beta$varcov)==rep(fixed$k,2))) {
+        stop("Bad prior for beta\n")
+      }
+    }
     # state
     state$fixed$beta <<- init.beta
     
@@ -281,13 +80,68 @@ GibbsLmm$methods(initialize =
     for (r in seq_along(random)){
       rd <- random[[r]]
       rname <- names(random)[r]
-      # structure and prior
-      vc <- parse.varcomp.arg(rname, rd, Sinv, default.prior.tau2=prior.sigma2)
-      .self$random[[rname]] <- vc
+      # simple factor-type specification
+      if (!is.list(rd)){
+        if (is.factor(rd)){
+          rd   <- list(factor=rd)
+        } else {
+          stop("Illegal object type of random effect ", rname,
+               "; it should be a list or a factor.")
+        }
+      }
+      if (!is.null(rd$factor)){
+        rd$Z <- incidence.matrix(rd$factor)
+      }
+      # use Z and R specifications
+      if (is.null(rd$Z) && is.null(rd$R)) {
+        stop("Must specify Z or R for random effect ", rname, "\n")
+      }
+      if (!is.null(rd$Z) && is.null(rd$R)) {  # Z only
+        if (nrow(rd$Z)!=nobs) {
+          stop("Z should have n rows for random effect ", rname)
+        }
+        rd$k <- ncol(rd$Z)
+        rd$R <- diag(rep(1,rd$k))
+      } else if (is.null(rd$Z) && !is.null(rd$R)) { # R only
+        if (length(y)!=ncol(rd$R)){
+          stop("R must be n x n if Z is unspecified for random effect ", rname, "\n")
+        }
+        rd$k <- length(y)
+        rd$Z <- diag(length(y))
+      } else { # Z and R
+        if (ncol(rd$Z)!=ncol(rd$R)){
+          stop("Z and R sizes are incompatible for random effect", rname, "\n")
+        }
+        rd$k <- ncol(rd$Z)
+      }
+      if (!isSymmetric(rd$R)){
+        stop("R must be a symmmetric matrix for random effect", rname, "\n")
+      }
+
+      # dimension and correlation matrix      
+      rd$Rinv = solve(rd$R)
+      
+      ## blocking options
+      # allow to be in a block update by default
+      if (is.null(rd$blocking)) {
+        rd$blocking = TRUE
+      }
+      # optimizations for non-block updating
+      if (!rd$blocking) {
+        rd$Zt  = t(rd$Z)
+        rd$ZtZ = t(rd$Z) %*% rd$Z
+      }
+    
+      # priors
+      if (is.null(rd$prior.tau2)) {
+        rd$prior.tau2=prior.sigma2
+      }
+      random <<- c(.self$random, list(rd))
+    
       # state
       state$random[[r]] <<- list(
           tau2=1,
-          ranef=rep(0, vc$get.k()))
+          ranef=rep(0,rd$k))
     }
     names(state$random) <<- names(random)
     
@@ -329,6 +183,7 @@ GibbsLmm$methods(initialize =
         )
       )
     )
+
     callSuper(...)
   }
 )
@@ -476,17 +331,25 @@ GibbsLmm$methods(update.block =
 )
 
 GibbsLmm$methods(update.ranef =
-  function(r) {
+  function(r)
+  {
     'Updates effects vector for specified random component
     using its full conditional distribution
     '
-    yres <- .self$yresid(exclude=r)
-    rstate <- state$random[[r]]
-    vc <- random[[r]]
-    A <- vc$calc.post.A(state$sigma2inv, state$tau2inv)
-    B <- vc$calc.post.B(state$sigma2inv, yres)
-    u <- rmvnormAB(A=A, B=B)
-    state$random[[r]]$ranef <<- u
+    yres = .self$yresid(exclude=r)
+    rstate = state$random[[r]]
+    rd = random[[r]]
+    Prec1 = rd$ZtZ/state$sigma2 + rd$Rinv/rstate$tau2
+    
+    ## slowest step for large matrices
+    # Sigma1 = solve(Prec1) # 20s/20
+    Sigma1 = chol2inv(chol(Prec1))    # 11s/20
+    
+    Mu1.unscaled = rd$Zt %*% yres / state$sigma2
+    Mu1= Sigma1 %*% Mu1.unscaled
+    
+    ## 2nd slowest step
+    state$random[[r]]$ranef <<- c(rmnorm(mean=Mu1, varcov=Sigma1))    # 5s/20
   }
 )
 
@@ -517,24 +380,28 @@ GibbsLmm$methods(update.tau2 =
 )
 
 GibbsLmm$methods(yhat =
-  function(exclude=NULL) {
+  function(exclude=NULL)
+  {
     'Returns the predicted value of y given all but the excluded components,
     where 0 denotes the fixed effects, and 1 or greater denotes the corresponding
     random component
     '
     yhat = numeric(nobs)
-    if (!(0 %in% exclude)) {
+    if (!(0 %in% exclude))
+    {
       yhat=fixed$X %*% state$fixed$beta
     }
-    for (r in setdiff(seq_along(random),exclude)) {
-      yhat = yhat + random[[r]]$get.Z() %*% state$random[[r]]$ranef
+    for (r in setdiff(seq_along(random),exclude))
+    {
+      yhat = yhat + random[[r]]$Z %*% state$random[[r]]$ranef
     }
     yhat
   }
 )
 
 GibbsLmm$methods(yresid =
-  function(exclude=NULL)  {
+  function(exclude=NULL)
+  {
     'Returns the residual of y after prediction based on all components except
     those specified as excluded -- see method yhat()
     '
