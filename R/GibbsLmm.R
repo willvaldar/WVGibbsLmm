@@ -1,280 +1,189 @@
 
-
-make.orthobasis <- function(k){
-  J <- matrix(1, k, k)
-  M <- diag(k) - J / k # make centering matrix
-  Q <- qr.Q(qr(M))  # orthonormal basis
-  C <- Q[, 1:(k - 1)]  # drop final column
-  C
-}
-
-rinv.chisq <- function(n, scale, df){
-  scale/rchisq(n=n, df=df)
-}
-
-
-rmvnormAB <- function(B, U = NULL, A = NULL) {
-  # Either U (chol(A)) or A must be provided
-  if (is.null(U) && is.null(A)) stop("Either U or A must be provided")
-
-  # Compute Cholesky if needed
-  if (is.null(U)) {
-    if (!is.matrix(A)) A <- as.matrix(A)
-    U <- chol(A)  # Upper-triangular
-  }
   
-  n <- length(B)
-  # Solve for mean: mu = A^{-1} B using triangular solves
-  y <- forwardsolve(t(U), B)   # Solve t(U) y = B
-  mu <- backsolve(U, y)        # Solve U mu = y
-  
-  # Sample from standard normal
-  z <- rnorm(n)
-  
-  # Transform to get covariance A^{-1}: x = mu + A^{-1/2} z
-  w <- forwardsolve(t(U), z)   # Solve t(U) w = z
-  x <- mu + w
-  
-  return(x)
-}
-
-
-classify.corrmat <- function(R){
-  if (!isSymmetric(R)){ return "nonsymmetric" }
-  if (all(R==diag(ncol(R)))){ return "I" }
-  if (all(R==diag(diag(R)))){ return "diag" }
-  return "full"
-}
-
-  
+## Variance component class
 GibbsLmm_VarComp <- setRefClass(
-  Class="GibbsLmm_VarComp",
-  fields=list(
+  "GibbsLmm_VarComp",
+  fields = list(
     # public
-    name = "character",
-    Z = "matrix",
-    R = "matrix",
-    Sinv = "matrix", # R_eps^{-1}
-    # private
-    ZtSinv = "matrix",
-    ZtSinvZ = "matrix",
-    Rinv = "matrix")
+    Z              = "matrix",
+    R              = "matrix",
+    prior.tau2inv  = "list",
+    Vinv           = "matrix",  # R_eps^{-1}
+    stz            = "character",
+    # added after construction
+    ZtVinv         = "ANY",
+    ZtVinvZ        = "ANY",
+    Rinv           = "ANY"
+  )
 )
 
 GibbsLmm_VarComp$methods(
-  initialize = function(Z, R, Sinv, ...){ 
-    Z <<- Z
-    R <<- R
-    Rinv <<- solve(R)
-    Sinv <<- Sinv
-    ZtSinv <<- NULL
-    ZtSinvZ <<- NULL
-    callSuper(...)
+  initialize = function(Z, R, prior.tau2inv, Vinv, stz, ...){
+    ## assign arguments safely to fields
+    stopifnot(is.matrix(Z), is.matrix(R), is.matrix(Vinv))
+    .self$Z       <- Z
+    .self$R       <- R
+    .self$prior.tau2inv <- prior.tau2inv
+    .self$Vinv    <- Vinv
+    .self$stz     <- stz
+    .self$Rinv    <- solve(R)
+    .self$ZtVinv  <- NULL
+    .self$ZtVinvZ <- NULL
+  },
+  getEffectNames = function(){
+    colnames(.self$Z)
   },
   get.k = function(){
-    return (ncol(Z))
+    ncol(.self$Z)
   },
   get.Rinv = function(){
-    return (Rinv)
+    .self$Rinv
   },
   get.Z = function(){
-    return (Z)
+    .self$Z
   },
-  get.ZtSinv = function(){
-    if (is.null(ZtSinv)){
-      ZtSinv <<- t(Z)%*%Sinv
+  get.ZtVinv = function(){
+    if (is.null(.self$ZtVinv)){
+      .self$ZtVinv <- t(.self$Z) %*% .self$Vinv
     }
-    ZtSinv
+    .self$ZtVinv
   },
-  get.ZtSinvZ = function(){
-    if (is.null(ZtSinvZ)){
-      ZtSinvZ <<- .self$get.ZtSinv()%*%Z
+  get.ZtVinvZ = function(){
+    if (is.null(.self$ZtVinvZ)){
+      .self$ZtVinvZ <- .self$get.ZtVinv() %*% .self$Z
     }
-    ZtSinvZ
+    .self$ZtVinvZ
   },
-  calc.post.prec <- function(u){
-    k <- ncol(Z)
-    shape <- 0.5*k + prior.shape
-    rate <- 0.5*(u%*%Rinv%*%u + prior.rate)
-    return (c(shape, rate))
+  calc.init.tau2inv = function(){
+    return (1)
   },
-  calc.post.u.A <- function(sigma2inv, tau2inv){
-    .self$get.ZtSinvZ()*sigma2inv + Rinv*tau2inv
+  calc.init.u = function(){
+    u <- rep(0, times=.self$get.k())
+    names(u) <- .self$getEffectNames()
+    u
   },
-  calc.post.u.B <- function(sigma2inv, yres){
-    .self$get.ZtSinv()%*%yresid*sigma2inv
+  calc.post.tau2inv = function(u){
+    k     <- ncol(.self$Z)
+    shape <- 0.5*k + prior.tau2inv$shape
+    rate  <- 0.5*crossprod(u, .self$Rinv %*% u) + prior.tau2inv$rate
+    list(shape=shape, rate=rate)
+  },
+  calc.post.u.A = function(sigma2inv, tau2inv){
+    stopifnot(!is.null(sigma2inv))
+    stopifnot(!is.null(tau2inv))
+    .self$get.ZtVinvZ()*sigma2inv + .self$Rinv*tau2inv
+  },
+  calc.post.u.B = function(sigma2inv, yres){
+    .self$get.ZtVinv() %*% yres * sigma2inv
+  },
+  sample.post.u = function(sigma2inv, tau2inv, yres){
+    A <- .self$calc.post.u.A(sigma2inv, tau2inv)
+    B <- .self$calc.post.u.B(sigma2inv, yres)
+    u <- c(rmvnormAB(A=A, B=B, stz=.self$stz))
+    names(u) <- .self$getEffectNames()
+    return (u)
   },
   set.Z = function(Z){
-    if (ncol(Z)!=ncol(R)){
+    if (ncol(Z) != ncol(.self$R)){
       stop("bad Z")
     }
-    Z <<- Z
-    ZtSinv <<- NULL
-    ZtSinvZ <<- NULL
+    .self$Z       <- Z
+    .self$ZtVinv  <- NULL
+    .self$ZtVinvZ <- NULL
   }
 )
-                         
+
+## Fixed effects class - contains VarComp class
 GibbsLmm_FixedEffects <- setRefClass(
-  Class="GibbsLmm_FixedEffects",
-  fields=list(
-    vc = "GibbsLmm_VarComp", # use VarComp to hold X and R
+  "GibbsLmm_FixedEffects",
+  fields = list(
+    vc      = "ANY", #GibbsLmm_VarComp", # use VarComp to hold X and R
     tau2inv = "numeric"
   )
 )
 
 GibbsLmm_FixedEffects$methods(
-  initialize = function(X, R, tau2inv, Sinv, ...){
-    vc <<- GibbsLmm_VarComp$new(Z=X, R=R, Sinv)
-    tau2inv <<- tau2inv
-    callSuper(...)
+  initialize = function(X, R, tau2inv, Vinv, ...){
+    .self$vc      <- GibbsLmm_VarComp$new(Z=X,
+                                          R=R,
+                                          Vinv=Vinv,
+                                          prior.tau2inv=list(),
+                                          stz="off") # stz doesn't make sense for mu
+    .self$tau2inv <- tau2inv
   },
-  get.X <- function(){
-    vc$get.Z()
+  getEffectNames = function(){
+    .self$vc$getEffectNames()
   },
-  get.k <- function(){
-    vc$get.k()
+  get.X = function(){
+    .self$vc$get.Z()
   },
-  get.Rinv <- function(){
-    vc$get.Rinv()
+  get.k = function(){
+    .self$vc$get.k()
   },
-  calc.post.beta.A <- function(sigma2inv){
-    vc$get.ZtSinvZ()*sigma2inv + vc$Rinv*tau2inv
+  get.Rinv = function(){
+    .self$vc$get.Rinv()
   },
-  calc.post.beta.B <- function(sigma2inv, yres){
-    vc$get.ZtSinv %*% yres*sigma2inv
+  calc.post.beta.A = function(sigma2inv){
+    .self$vc$get.ZtVinvZ()*sigma2inv + .self$vc$get.Rinv()*tau2inv
+  },
+  calc.post.beta.B = function(sigma2inv, yres){
+    .self$vc$get.ZtVinv() %*% yres * sigma2inv
+  },
+  sample.post.beta = function(sigma2inv, yres){
+    A <- .self$calc.post.beta.A(sigma2inv)
+    B <- .self$calc.post.beta.B(sigma2inv, yres)
+    beta <- c(rmvnormAB(A=A, B=B, stz="off"))
+    names(beta) <- .self$getEffectNames()
+    return (beta)
   }
 )
-  
 
-parse.varcomp.arg <- function(rname, rd, Sinv){
-  n <- nrow(Sinv)
-  if (!is.list(rd)){
-    if (is.factor(rd)){
-      rd   <- list(factor=rd)
-    } else {
-      stop("Illegal object type of random effect ", rname,
-           "; it should be a list or a factor.")
-    }
-  }
-  if (!is.null(rd$factor)){
-    rd$Z <- incidence.matrix(rd$factor)
-  }
-  if (is.null(rd$Z) && is.null(rd$R)) {
-    stop("Must specify Z or R for random effect ", rname, "\n")
-  }
-  # use Z and R specifications
-  if (!is.null(rd$Z) && is.null(rd$R)) {  # Z only
-    if (nrow(rd$Z)!=n) {
-      stop("Z should have n rows for random effect ", rname)
-    }
-    rd$R <- diag(rep(1, ncol(rd$R))) # R=I
-  } else if (is.null(rd$Z) && !is.null(rd$R)) { # R only
-    if (ncol(rd$R)=n){
-      stop("R must be n x n if Z is unspecified for random effect ", rname, "\n")
-    }
-    rd$Z <- diag(n)
-  } else { # Z and R
-    if (nrow(rd$Z)!=n) {
-      stop("Z should have n rows for random effect ", rname)
-    }
-    if (ncol(rd$Z)!=ncol(rd$R)){
-      stop("Z and R sizes are incompatible for random effect", rname, "\n")
-    }
-  }
-  Rtype <- classify.corrmat(rd$R)
-  if ("nonsymmetric"==Rtype){
-    stop("R must be a symmmetric matrix for random effect", rname, "\n")
-  }
-  vc <- GibbsLmm_VarComp$new(
-    name=rname,
-    Z=rd$Z,
-    R=rd$R,
-    prior.tau2=rd$prior
-    Sinv=Sinv)
-  return (vc)
-}
-
-parse.fixedeffects.arg <- function(X, R, prior){
-  k <- ncol(X)
-  prior.beta$mean <<- matrix(nrow=fixed$k, rep(prior.beta$mean, length.out=fixed$k))
-  if (1==fixed$k) {
-    fixed$prior.beta$varcov <<- matrix(prior.beta$varcov)
-  } else { 
-    if (length(fixed$prior.beta$varcov)==1) {
-      fixed$prior.beta$varcov <<- rep(fixed$prior.beta$varcov, length.out=fixed$k)
-    }
-    if (length(fixed$prior.beta$varcov)==fixed$k) {
-      fixed$prior.beta$varcov <<- diag(fixed$prior.beta$varcov)
-    }
-    if (!all(dim(fixed$prior.beta$varcov)==rep(fixed$k,2))) {
-      stop("Bad prior for beta\n")
-    }
-  }
-  fixed <- GibbsLmm_FixedEffects$new(
-    X = X,
-    R = R,
-    
-}
-
-
-
-
-
-lmmgibbs <- function(...){
-  g <- GibbsLmm$new(...)
-  g
-}
 
 GibbsLmm <- setRefClass("GibbsLmm",
   fields=list(
     y                = "numeric",
     prior.sigma2inv  = "list",
-    Sinv             = "matrix",
+    Vinv             = "matrix",
     nobs             = "integer",
     nrand            = "integer",
-    fixed            = "list",
-    random           = "list",
-    block            = "list",
-    state            = "list")
+    fixed            = "ANY", # GibbsLmm_FixedEffects object
+    random           = "list", # list of GibbsLmm_VarComp objects
+    state            = "list",
+    Z.updater        = "ANY") # function to update Zs
 )
-
 
 GibbsLmm$methods(initialize =
   function(
       y,
-      X             = matrix(rep(1, length(y)), ncol=1), # default intercept
-      S             = diag(1, nrow(X)), # error structure
-      random        = list(),
-      prior.beta    = list(mean=0, R=1, tau2inv=0.001),
-      prior.sigma2  = list(shape=0.02, rate=0.02),
-      init.beta     = rep(0,ncol(X)),
-      init.sigma2   = sd(y, na.rm=TRUE),
-      fixef.blocking=TRUE,
+      X,
+      V,
+      prior.beta,
+      prior.sigma2inv,
+      random  = list(),
+      Z.updater = NULL,
       ...)
   {
-    y <<- c(y)
-    nobs <<- length(y)
-    if (is.numeric(S)){
+    .self$y <- c(y)
+    .self$nobs <- length(y)
+    verify.corrmat(V, nobs)
+    .self$Vinv <- solve(V)
 
-
-    if (nrow(X)!=nobs){
-      stop("X must have ", nobs, " rows")
-    }
-    
-    
     ## Fixed Effects
     # basics
-    fixed <<- parse.fixedeffects.arg(X, prior.beta, Sinv)
-        
-    # priors
+    fixed <<- GibbsLmm_FixedEffects$new(
+      X=X,
+      R=prior.beta$corrmat,
+      tau2inv=1/prior.beta$var,
+      Vinv=Vinv)
     # state
-    state$fixed$beta <<- init.beta
+    state$fixed$beta <<- rep(0, fixed$get.k())
+    names(state$fixed$beta) <<- fixed$getEffectNames()
     
     ## Noise    
     # priors
-    prior.sigma2 <<- prior.sigma2
-    state$sigma2 <<- init.sigma2
-    
+    .self$prior.sigma2inv <<- prior.sigma2inv
+    state$sigma2inv <<- 1/var(.self$y)
+
     ## Random effects
     nrand <<- length(random)
     state$random <<- list()
@@ -282,53 +191,20 @@ GibbsLmm$methods(initialize =
       rd <- random[[r]]
       rname <- names(random)[r]
       # structure and prior
-      vc <- parse.varcomp.arg(rname, rd, Sinv, default.prior.tau2=prior.sigma2)
+      vc <- GibbsLmm_VarComp$new(
+        Z = rd$Z,
+        R = rd$R,
+        prior.tau2inv = rd$prior.tau2inv,
+        Vinv = Vinv,
+        stz = rd$stz)
       .self$random[[rname]] <- vc
-      # state
+      # state  -- maybe should be generated by the vc?
       state$random[[r]] <<- list(
-          tau2=1,
-          ranef=rep(0, vc$get.k()))
+          tau2inv=vc$calc.init.tau2inv(),
+          ranef=vc$calc.init.u())
     }
     names(state$random) <<- names(random)
-    
-    # optimizations
-    if (!fixef.blocking) {
-      fixed$Prec0     <<- solve(fixed$prior$varcov)
-      fixed$Prec0.Mu0 <<- fixed$Prec0 %*% fixed$prior$mean
-      fixed$Xt        <<- t(fixed$X)
-      fixed$XtX       <<- fixed$Xt%*%fixed$X
-    }
-
-    ## Construct a block of effects, to be updated as one.
-    # Members of the block, listed in block$contents, include
-    #  0: fixed effects
-    #  1: random effect 1
-    #  2: random effect 2 ... etc ...
-    
-    # make a list of who is in the block
-    block$contents <<- c(
-        ifow(fixef.blocking, 0, NULL),
-        which(sapply(.self$random, function(x){x$blocking})))
-
-    if (fixef.blocking) {
-      block$Mu0 <<- fixed$prior$mean
-      block$X   <<- fixed$X
-    }
-    for (r in setdiff(block$contents, 0)) { # add each participating random effect to the block
-      rd        <-  .self$random[[r]]
-      block$Mu0 <<- c(block$Mu0, rep(0, rd$k))
-      block$X   <<- cbind(block$X, .self$random[[r]]$Z)
-    }
-    block$Xt  <<- t(block$X)
-    block$XtX <<- block$Xt %*% block$X
-    block$SigmaR <<- as.matrix(
-      Matrix::bdiag(
-        c(
-          ifow(fixef.blocking, fixed$prior$varcov, NULL),
-          lapply(.self$random[block$contents], function(x){x$R})  # or is it Rinv?
-        )
-      )
-    )
+    .self$Z.updater <<- Z.updater
     callSuper(...)
   }
 )
@@ -357,27 +233,27 @@ GibbsLmm$methods(sample =
       mcmc.mat <- matrix(NA, ncol=length(eg.output), nrow=nsave)
       colnames(mcmc.mat) <- names(eg.output)
     }
-
+    # Draw MCMC samples
     isave <- 0
     for (i in 1:n.iter) {
-      ## effects
-      if (!(0 %in% block$contents)) {
-        .self$update.fixef()
-      }      
-      .self$update.block()
-      for (r in setdiff(seq_along(random), block$contents)) {
+      ## sample effects
+      .self$update.fixef()
+      for (r in seq_along(random)) {
         .self$update.ranef(r)
       }
-      
-      ## variances
-      .self$update.sigma2()
+      ## sample variances
+      .self$update.sigma2inv()
       for (r in seq_along(random)) {
-        .self$update.tau2(r)
+        .self$update.tau2inv(r)
       }
-
+      ## sample Z
+      if (!is.null(.self$Z.updater)){
+        .self$update.Z()
+      }
+      
       # recording values
       if (!is.null(extractor) && i > burnin && 0==i%%thin) {
-        isave=isave+1
+        isave <- isave+1
         mcmc.mat[isave,] = extractor(state)
       }
       if (0<verbose.at && 0==i%%verbose.at) {
@@ -385,7 +261,6 @@ GibbsLmm$methods(sample =
       }
     }
     if (0<verbose.at) cat("\n")
-
     if (!is.null(extractor) && as.coda.object) {
         mcmc.mat=as.mcmc(mcmc.mat)
     }
@@ -399,13 +274,13 @@ GibbsLmm$methods(make.param.extractor =
     'Returns a function that will extract specified parameters
     from the state vector
     '
-    params = names(unlist(state))
-    wanted = integer(0)
+    params <- names(unlist(state))
+    wanted <- integer(0)
     if (all) {
-      wanted = 1:length(params)
+      wanted <- 1:length(params)
     } else {
       for (p in patterns) {
-        wanted = c(wanted, grep(p, params))
+        wanted <- c(wanted, grep(p, params))
       }
     }
     function(s) {
@@ -420,58 +295,9 @@ GibbsLmm$methods(update.fixef =
     'Updates the fixed effects vector
     using its full conditional distribution
     '
-    yres = .self$yresid(exclude=0)
-    Prec1 = fixed$XtX/state$sigma2 + fixed$Prec0
-
-    ## slow step for large matrices
-    # Sigma1 = solve(Prec1) # slower
-    Sigma1 = chol2inv(chol(Prec1)) # faster
-    
-    Mu1.unscaled = fixed$Xt %*% yres/state$sigma2 + fixed$Prec0.Mu0
-    Mu1 = Sigma1%*%Mu1.unscaled
-    state$fixed$beta <<- c(rmnorm(mean=Mu1, varcov=Sigma1))
-  }
-)
-
-GibbsLmm$methods(update.block =
-  function()
-  {
-    'Updates one or more components that have been concatenated
-    together as a block, from their block full conditional distribution.
-    For example, if block$contents contains 0, 1 and 2, then a
-    long vector containing fixed effects and random effects for 
-    random components 1 and 2 are updated in a single draw.
-    '
-    yres = .self$yresid(exclude=block$contents)
-    m <- NULL
-    if (0 %in% block$contents){ # if fixed effects are in the block
-      m <- rep(1, fixed$k)
-    }
-    for (r in setdiff(block$contents, 0)) {
-      m <- c(m, rep(state$random[[r]]$tau2, times=random[[r]]$k))
-    }
-    Sigma <- block$SigmaR %*% diag(m)
-    Prec0 <- solve(Sigma)
-    Prec1 <- block$XtX/state$sigma2 + Prec0
-
-    ## slow step for large matrices
-    # Sigma1 = solve(Prec1) # slower
-    Sigma1 = chol2inv(chol(Prec1)) # faster
-    
-    Mu1.unscaled = block$Xt %*% yres/state$sigma2 + Prec0 %*% block$Mu0
-    Mu1 = Sigma1%*%Mu1.unscaled
-    u = c(rmnorm(mean=Mu1, varcov=Sigma1))
-    
-    # allocate effects to state
-    i = 1:fixed$k
-    state$fixed$beta <<- u[i]
-    u=u[-i]
-    for (r in setdiff(block$contents, 0))
-    {
-      i = 1:random[[r]]$k
-      state$random[[r]]$ranef <<- u[i]
-      u = u[-i]
-    }
+    yres <- .self$yresid(exclude=0)
+    beta <- fixed$sample.post.beta(state$sigma2inv, yres)
+    state$fixed$beta <<- beta
   }
 )
 
@@ -483,36 +309,33 @@ GibbsLmm$methods(update.ranef =
     yres <- .self$yresid(exclude=r)
     rstate <- state$random[[r]]
     vc <- random[[r]]
-    A <- vc$calc.post.A(state$sigma2inv, state$tau2inv)
-    B <- vc$calc.post.B(state$sigma2inv, yres)
-    u <- rmvnormAB(A=A, B=B)
+    u <- vc$sample.post.u(state$sigma2inv, rstate$tau2inv, yres)
     state$random[[r]]$ranef <<- u
   }
 )
 
-GibbsLmm$methods(update.sigma2 =
+GibbsLmm$methods(update.sigma2inv =
   function()
   {
     'Updates sigma2 noise variance using its full conditional distribution
     '
-    yres = .self$yresid()
-    m1 = c( sum(yres^2) + prior.sigma2$scale )
-    nu1 = nobs + prior.sigma2$df
-    state$sigma2 <<- rinv.chisq(n=1, scale=m1, df=nu1)
+    yres <- .self$yresid()
+    shape <- .self$nobs/2 + prior.sigma2inv$shape
+    rate <- crossprod(yres, .self$Vinv %*% yres) + prior.sigma2inv$rate
+    state$sigma2inv <<- rgamma(1, shape=shape, rate=rate)
   }
 )
 
-GibbsLmm$methods(update.tau2 =
+GibbsLmm$methods(update.tau2inv =
   function(r)
   {
     'Updates variance tau2 for the specified random component
     using its full conditional distribution
-    ' 
-    rstate = state$random[[r]]
-    rd = random[[r]]
-    m1 = c((t(rstate$ranef) %*% rd$Rinv %*% rstate$ranef) + rd$prior.tau2$scale)
-    nu1 = rd$k + rd$prior.tau2$df
-    state$random[[r]]$tau2 <<- rinv.chisq(n=1, scale=m1, df=nu1)
+    '
+    rstate <- state$random[[r]]
+    vc <- random[[r]]
+    post <- vc$calc.post.tau2inv(state$random[[r]]$ranef)
+    state$random[[r]]$tau2inv <<- rgamma(1, shape=post$shape, rate=post$rate)
   }
 )
 
@@ -524,10 +347,10 @@ GibbsLmm$methods(yhat =
     '
     yhat = numeric(nobs)
     if (!(0 %in% exclude)) {
-      yhat=fixed$X %*% state$fixed$beta
+      yhat <- fixed$get.X() %*% state$fixed$beta
     }
-    for (r in setdiff(seq_along(random),exclude)) {
-      yhat = yhat + random[[r]]$get.Z() %*% state$random[[r]]$ranef
+    for (r in setdiff(seq_along(random), exclude)) {
+      yhat <- yhat + random[[r]]$get.Z() %*% state$random[[r]]$ranef
     }
     yhat
   }
@@ -542,6 +365,16 @@ GibbsLmm$methods(yresid =
   }
 )
 
+GibbsLmm$methods(update.Z =
+  function() {                   
+    which.r <- .self$Z.updater$whichComponents()
+    yres <- .self$yresid(exclude=which.r)
+    new.Z <- .self$Z.updater$sample.posterior.Z(yres=yres, Vinv=Vinv, state=state)
+    for (r in which.r){
+      .self$random[[r]]$set.Z( new.Z[[r]] )
+    }
+  }
+)
 
 
 
