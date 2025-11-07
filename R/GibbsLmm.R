@@ -149,7 +149,9 @@ GibbsLmm <- setRefClass("GibbsLmm",
     fixed            = "ANY", # GibbsLmm_FixedEffects object
     random           = "list", # list of GibbsLmm_VarComp objects
     state            = "list",
-    Z.updater        = "ANY") # function to update Zs
+    Z.updater        = "ANY", # function to update Zs
+    Z.update.every   = "integer",
+    Z.update.from    = "character") 
 )
 
 GibbsLmm$methods(initialize =
@@ -161,6 +163,8 @@ GibbsLmm$methods(initialize =
       prior.sigma2inv,
       random  = list(),
       Z.updater = NULL,
+      Z.update.every = 1,
+      Z.update.from = "posterior",
       ...)
   {
     .self$y <- c(y)
@@ -204,7 +208,9 @@ GibbsLmm$methods(initialize =
           ranef=vc$calc.init.u())
     }
     names(state$random) <<- names(random)
-    .self$Z.updater <<- Z.updater
+    .self$Z.updater <- Z.updater
+    .self$Z.update.every <- as.integer(Z.update.every)
+    .self$Z.update.from <- Z.update.from
     callSuper(...)
   }
 )
@@ -248,7 +254,9 @@ GibbsLmm$methods(sample =
       }
       ## sample Z
       if (!is.null(.self$Z.updater)){
-        .self$update.Z()
+        if (0==(i %% Z.update.every)){ # space out Z updates
+          .self$update.Z()
+        }
       }
       
       # recording values
@@ -368,8 +376,14 @@ GibbsLmm$methods(yresid =
 GibbsLmm$methods(update.Z =
   function() {                   
     which.r <- .self$Z.updater$whichComponents()
-    yres <- .self$yresid(exclude=which.r)
-    new.Z <- .self$Z.updater$sample.posterior.Z(yres=yres, Vinv=Vinv, state=state)
+    if ("posterior"==.self$Z.update.from){
+      yres <- .self$yresid(exclude=which.r)
+      new.Z <- .self$Z.updater$sample.posterior.Z(yres=yres, Vinv=Vinv, state=state)
+    } else if ("prior"==.self$Z.update.from){
+      new.Z <- .self$Z.updater$sample.prior.Z()
+    } else {
+      stop("Unrecognized value for argument Z.update.from `", Z.update.from, "`")
+    }
     for (r in which.r){
       .self$random[[r]]$set.Z( new.Z[[r]] )
     }
