@@ -70,6 +70,9 @@ parse.varcomp.arg <- function(rname, rd, default.prior, nobs){
   if (is.null(rd$prior)){
     rd$prior.tau2inv <- default.prior
   }
+  if (is.null(rd$stz)){
+    rd$stz <- "off"
+  }
   return (rd)
 }
 
@@ -111,6 +114,7 @@ lmmgibbs <- function(y,
                      prior.sigma2inv,
                      prior.tau2inv = NULL,
                      random = NULL,
+                     num.chains = 1,
                      Z.updater = NULL,
                      ...){
   if (any(is.na(y))){
@@ -135,7 +139,9 @@ lmmgibbs <- function(y,
     rd <- parse.varcomp.arg(rname, rd, default.prior=prior.tau2inv, nobs=length(y))
     random[[r]] <- rd
   }
-  g <- GibbsLmm$new(y=y,
+  chains <- list()
+  for (i in 1:num.chains){   
+    g <- GibbsLmm$new(y=y,
                     X=X,
                     V=V,
                     prior.beta = prior.beta,
@@ -143,7 +149,10 @@ lmmgibbs <- function(y,
                     random = random,
                     Z.updater = Z.updater,
                     ...)
-  g
+    chains[[i]] <- g
+  }
+  glist <- GibbsLmmList$new(chains)
+  glist
 }
 
 

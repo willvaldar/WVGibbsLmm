@@ -221,6 +221,7 @@ GibbsLmm$methods(sample =
     burnin=0,
     thin=1,
     verbose.at=round(n.iter/10),
+    verbose.prefix="",
     wanted=NULL,
     extractor=NULL,
     as.coda.object=TRUE
@@ -387,6 +388,50 @@ GibbsLmm$methods(update.Z =
     for (r in which.r){
       .self$random[[r]]$set.Z( new.Z[[r]] )
     }
+  }
+)
+
+####
+# Container class
+## 
+
+GibbsLmmList <- setRefClass("GibbsLmmList",
+                            fields = list(
+                              chains = "list"
+                            ))
+
+GibbsLmmList$methods(
+  initialize = function(chains){
+    for (i in 1:length(chains)){
+      stopifnot(is(chains[[i]], "GibbsLmm"))
+    }
+    .self$chains <- chains
+  })
+
+## # Serial
+## GibbsLmmList$methods(
+##   sample = function(...){
+##     out.list <- list()
+##     for (i in 1:length(.self$chains)){
+##       out.list[[i]] <- .self$chains[[i]]$sample(...)
+##     }
+##     mcmc.list(out.list)
+##   })
+  
+GibbsLmmList$methods(
+  sample = function(..., cores = parallel::detectCores()){
+    lapply(.self$chains, function(x){cat(x$state$sigma2inv, ";")})
+#    local.chains <- .self$chains # avoid capturing .self in the workers
+    dots   <- list(...)
+    out.list <- parallel::mclapply(
+      seq_along(chains),
+      function(i) do.call(
+        #        local.chains[[i]]$sample,
+        .self$chains[[i]]$sample,
+        dots),
+      mc.cores = cores
+    )
+    coda::mcmc.list(out.list)
   }
 )
 
