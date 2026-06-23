@@ -4,20 +4,23 @@
 #' (vertical dash) and the posterior medians (narrow gap; Tufte-inspired).
 #' 
 #' @return A data frame of all data plotted along with y axis locations
-plot.hpd <- function(coda.object, wanted=colnames(coda.object),
+plot.hpd <- function(coda.object, wanted=varnames(coda.object),
 		prob.wide=0.95,
 		prob.narrow=0.50,
                 xlab="HPD interval",
 		names=NULL, ...)
 {
 	if (is.integer(wanted)) which.wanted <- wanted
-	else which.wanted <- match(wanted, colnames(coda.object))
+	else which.wanted <- match(wanted, varnames(coda.object))
 	num.wanted  <- length(which.wanted)
 
+        # flatten across chains
+        coda.object <- mcmc(as.matrix(coda.object))
+        mat <- as.matrix(as.matrix(coda.object)[, which.wanted])
         d <- list(
           name = wanted,
-          mu = colMeans(coda.object)[which.wanted],
-          median = apply(coda.object, 2, median)[which.wanted],
+          mu = colMeans(mat),
+          median = apply(mat, 2, median),
           hpd.wide = coda::HPDinterval(coda.object, prob=prob.wide)[which.wanted,],
           hpd.narrow = coda::HPDinterval(coda.object, prob=prob.narrow)[which.wanted,]
         )
